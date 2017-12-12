@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Gets all the singles results from an event from smash.gg
 .DESCRIPTION
@@ -27,10 +27,11 @@
 
 #Import all the tags of the players in the possible pr
 $playerarray = Import-Csv C:\Users\Andi\Desktop\562PR.csv 
-$playerarray | Sort-Object -Property PLayerTags
+$playerarray = $playerarray | Sort-Object -Property PLayerTags
 
 #Import all the tournaments regarded for the PR
 $Tournaments = Import-Csv C:\Users\Andi\Desktop\tournamentname.csv
+$Tournaments = $Tournaments | Sort-Object -Property TournamentLinks -Unique
 
 Function Query-Tournamentinfo{
     
@@ -45,13 +46,14 @@ Function Query-Tournamentinfo{
     $PhaseGroupArray = $null
     $SetArray = $null
     $StandingsArray = $null
+    $AmateurBracketId = $null
+    $PoolPhaseId = $null
+    $TopPhaseId = $null
 
     Write-Host $TournamentLinkString
 
     #Tournament URL definition
     $TournamentUri =  $("https://api.smash.gg/tournament/" + $TournamentLinkString + "/event/melee-singles?expand[]=phase&expand[]=groups")
-
-    
 
     #Call auf das smash.gg api
     $TournamentResponse = Invoke-RestMethod -Uri $TournamentUri
@@ -60,7 +62,8 @@ Function Query-Tournamentinfo{
     #Events sind singles, doubles, crews etc
     Foreach( $TournamentEvent in $TournamentResponse.entities.event ){
         
-        If( $TournamentEvent.name -ne $null){
+        #Check if the awnser from the rest api actually has value
+        If($TournamentEvent.name -ne $null){
 
             #Checken ob der Event den string singles beinhalted
             If($TournamentEvent.name -like "*Singles*"){
@@ -68,33 +71,55 @@ Function Query-Tournamentinfo{
                 #Falls ja dann den event seine event ID auslesen für spätere quering 
                 $SinglesEventID = $TournamentEvent.Id
             
-            Write-host "test1"
             }#End of If($TournamentEvent.name -like "*Singles*")
-        write-host "test2"
-        }
 
-    write-host "test3"
+        }#If($TournamentEvent.name -ne $null)
+
     }#End of Foreach( $TournamentEvent in $TournamentResponse.entities.event )
 
     #Checkt ob der singles event gefunden wurde
     if($SinglesEventID -ne $null){
+        
+        #Clear out variable to determind if the eventphase is amateur bracket
+        $AmateurBracketBool = $false
     
-        #Rest api call für die event informationen
+        #Rest api call for the event information
         $EventUri = $("https://api.smash.gg/event/" + $SinglesEventID + "?expand[]=groups&expand[]=phase" )
         $EventResponse =  Invoke-RestMethod -Uri $Eventuri
 
-        #Einen Array createn für die verschieden phasen des events
+        #Create an array for all the phases of the event
         $PhaseArray = @()
 
-        
+        $PhaseCounter = 0
 
-        #Foreach event phase im event 
-        #Event phase ist zum beispiel pools 
+        Foreach($EventPhaseCountItem in $EventResponse.entities.phase){
+
+            if($EventPhaseCountItem.name -notlike "*amateur*"){
+                $PhaseCounter++
+            }
+
+        }
+
+        #Foreach event phase in the event 
+        #As an example pools, top 32 or bracket 
         Foreach($EventPhase in $EventResponse.entities.phase){
             
-            if($EventPhase.name -notlike "*amateur*"){
-                #$AmateurBracketId = $EventPhase.id
-            
+            #Check if the event phase is the amateur bracket
+            If($EventPhase.name -like "*amateur*"){
+                
+                #Set the variable to true
+                $AmateurBracketBool = $true
+
+            }#If($EventPhase.name -like "*amateur*")
+
+            $IsTopBracket = $false
+
+            if($EventPhase.phaseOrder -eq $PhaseCounter){
+                $IsTopBracket = $true
+            }
+            elseif($EventPhase.phaseOrder -lt $PhaseCounter){
+                $IsTopBracket = $false
+            }
 
 
             #Erstellt ein Phase object für denn event
@@ -104,6 +129,7 @@ Function Query-Tournamentinfo{
             Add-Member -InputObject $NewPhaseObject -MemberType NoteProperty -Name name -Value $EventPhase.name   
             Add-Member -InputObject $NewPhaseObject -MemberType NoteProperty -Name id -Value $EventPhase.id
             Add-Member -InputObject $NewPhaseObject -MemberType NoteProperty -Name tier -Value $EventPhase.tier
+            Add-Member -InputObject $NewPhaseObject -MemberType NoteProperty -Name istopbracket -Value $IsTopBracket
         
             #added das object zum phase object array
             $PhaseArray += $NewPhaseObject  
@@ -114,6 +140,8 @@ Function Query-Tournamentinfo{
             #Foreach Phasegroup im event response
             Foreach($PhaseGroup in $EventResponse.entities.groups){
 
+                if($PhaseGroup.phaseId -eq $EventPhase.id){
+
                     #Erstelle ein Phase group object
                     $NewPhaseGroupObject = New-Object psobject
 
@@ -122,6 +150,8 @@ Function Query-Tournamentinfo{
                     Add-Member -InputObject $NewPhaseGroupObject -MemberType NoteProperty -Name PhaseGroupBelongsToId -Value $PhaseGroup.phaseId
                     Add-Member -InputObject $NewPhaseGroupObject -MemberType NoteProperty -Name groupTypeId -Value $PhaseGroup.GroupTypeId
                     Add-Member -InputObject $NewPhaseGroupObject -MemberType NoteProperty -Name SetesOnDeck -Value $PhaseGroup.setsOnDeck
+                    Add-Member -InputObject $NewPhaseGroupObject -MemberType NoteProperty -Name istopbracket -Value $EventPhase.IsTopBracket
+
             
                     #Falls die phase id nicht null ist 
                     if($PhaseGroup.waveId -ne $null){
@@ -152,10 +182,15 @@ Function Query-Tournamentinfo{
             
                     }#End of else($PhaseGroup.winnersTargetPhaseId -ne $null)
 
-                    #Adde phase group zum phase group array
-                    $PhaseGroupArray += $NewPhaseGroupObject
+                    if($AmateurBracketBool -eq $false){
+
+                        #Adde phase group zum phase group array
+                        $PhaseGroupArray += $NewPhaseGroupObject
+
                     }
-                }#End of Foreach($PhaseGroup in $EventResponse.entities.groups)
+                }
+                    
+            }#End of Foreach($PhaseGroup in $EventResponse.entities.groups)
 
             #Instanzieren von allen gebrauchten arrays
             $PLayerArray= @()
@@ -195,6 +230,8 @@ Function Query-Tournamentinfo{
                             }#End of if(-NOT($PLayerArray | Where-Object{$_.id -eq $NewPlayerObject.id }))
                         }
 
+                        <#
+
                         Foreach($Seed in $PhaseGroupResponse.entities.seeds){
                             $NewSeedObject = New-Object psobject
                             Add-Member -InputObject $NewSeedObject -MemberType NoteProperty -Name id -Value $Seed.id
@@ -227,6 +264,8 @@ Function Query-Tournamentinfo{
                             $SetArray += $NewSetObject
                         }
 
+                        #>
+
                         Foreach($Standing in $PhaseGroupResponse.entities.standings){
 
                             $NewStandingObject = New-Object psobject
@@ -242,19 +281,14 @@ Function Query-Tournamentinfo{
                             Add-Member -InputObject $NewStandingObject -MemberType NoteProperty -Name placement -Value $Standing.placement
                             Add-Member -InputObject $NewStandingObject -MemberType NoteProperty -Name losses -Value $Standing.losses
                             Add-Member -InputObject $NewStandingObject -MemberType NoteProperty -Name destPhaseId -Value $Standing.destPhaseId
-
-                            if( $EventPhase.name -like "*Amateur*"){
-
-                                Add-Member -InputObject $NewStandingObject -MemberType NoteProperty -Name isAmateurBracket -Value $true
-
-                            }
+                            Add-Member -InputObject $NewStandingObject -MemberType NoteProperty -Name istopbracket -Value $PhaseGroupInArray.IsTopBracket
+            
 
                             $StandingsArray += $NewStandingObject
                         }
                 }
             }
         }
-        Write-HOst "Breakpoint"
 
         <#
         $PLayerArray | Export-Csv -Path D:\scripts\ColloseumBasel4\Players.csv -NoTypeInformation
@@ -265,9 +299,9 @@ Function Query-Tournamentinfo{
         $SetArray | Export-Csv -Path D:\scripts\ColloseumBasel4\Sets.csv -NoTypeInformation
         #>
 
-        $StandingsArray | Export-Csv -Path D:\scripts\power9\Standings.csv -NoTypeInformation
+        #$StandingsArray | Export-Csv -Path D:\scripts\power9\Standings.csv -NoTypeInformation
 
-        return $StandingsArray, $PLayerArray, $AmateurBracketId
+        return $StandingsArray, $PLayerArray, $PoolPhaseId, $TopPhaseId
     }
     else{
         Write-Host "event ID is empty, singles was not found in title"
@@ -329,51 +363,45 @@ Foreach($tournament in $Tournaments){
         $playerID = $tournamentInfo[1] | Where-Object -Property gamertag -eq $player.PlayerTags 
         $PLayerPLacement = $tournamentInfo[0] | Where-Object -Property entrantID -eq $playerID.entrantId 
 
-        if($PLayerPLacement.count -ge 1){
-            Write-Host "test"
-        }
-
-        
-            
         #Export the placing to the array
         if($PLayerPLacement -ne $null){
 
-            if($PLayerPLacement.phaseId -ne $tournamentInfo[2]){
-            
+            Foreach($placementResult in $PLayerPLacement){
+
                 if($PLayerPLacement.count -ge 1){
+                    
+                    if($PLayerPLacement.istopbracket){
 
-                    if($PLayerPLacement[0].destPhaseId -ne $null){
+                        $TournamentWithPlacings | add-member Noteproperty -TypeName String $playerID.GamerTag $($placementResult.placement) -Force -PassThru
 
-                        $TournamentWithPlacings | add-member Noteproperty $playerID.GamerTag $($PLayerPLacement[0].placement)
+                        $lossesString = Get-Losses -TournamentInfo $tournamentInfo[1] -PLayerPerformance $placementResult
 
-                        $lossesString = Get-Losses -TournamentInfo $tournamentInfo[0] -PLayerPerformance $PLayerPLacement
-
-                        $TournamentWithLosses | add-member Noteproperty $playerID.GamerTag $lossesString
-
+                        $TournamentWithLosses | add-member Noteproperty $playerID.GamerTag $lossesString -Force -PassThru
+                    
                     }
-                    else{
 
-                        $TournamentWithPlacings | add-member Noteproperty $playerID.GamerTag $PLayerPLacement[1].placement
+            
+                }
+                elseif($PLayerPLacement.count -eq 1){
 
-                        $lossesString = Get-Losses -TournamentInfo $tournamentInfo[1] -PLayerPerformance $PLayerPLacement
+                        $TournamentWithPlacings | add-member Noteproperty -TypeName String $playerID.GamerTag $($placementResult.placement) -Force -PassThru
 
-                        $TournamentWithLosses | add-member Noteproperty $playerID.GamerTag $lossesString
-                    }
+                        $lossesString = Get-Losses -TournamentInfo $tournamentInfo[1] -PLayerPerformance $placementResult
+
+                        $TournamentWithLosses | add-member Noteproperty $playerID.GamerTag $lossesString -Force -PassThru
+                
                 }
                 else{
-             
-                    $TournamentWithPlacings | add-member Noteproperty $playerID.GamerTag $PLayerPLacement[0].placement
 
-                    $lossesString = Get-Losses -TournamentInfo $tournamentInfo[1] -PLayerPerformance $PLayerPLacement
+                    $TournamentWithPlacings | add-member Noteproperty -TypeName String $playerID.GamerTag $($placementResult.placement) -Force -PassThru
 
-                    $TournamentWithLosses | add-member Noteproperty $playerID.GamerTag $lossesString
-                }            
-            }
-            else{
-           
-                $TournamentWithPlacings | add-member Noteproperty $player.PlayerTags "NA"
-                $TournamentWithLosses | add-member Noteproperty $player.PlayerTags "NA"    
-                       
+                    $lossesString = Get-Losses -TournamentInfo $tournamentInfo[1] -PLayerPerformance $placementResult
+
+                    $TournamentWithLosses | add-member Noteproperty $playerID.GamerTag $lossesString -Force -PassThru
+
+
+                }
+
             }
         }
         else{
@@ -382,9 +410,10 @@ Foreach($tournament in $Tournaments){
             Write-Host $("player in question " + $player.PlayerTags)
             Write-Host "-------------------------------------"
 
-             $TournamentWithPlacings | add-member Noteproperty $player.PlayerTags "NA"
-             $TournamentWithLosses | add-member Noteproperty $player.PlayerTags "NA"   
+            $TournamentWithPlacings | add-member Noteproperty $player.PlayerTags "NA"
+            $TournamentWithLosses | add-member Noteproperty $player.PlayerTags "NA"   
         }
+        
     }
 
     $overallarrayOfPlacings += $TournamentWithPlacings
